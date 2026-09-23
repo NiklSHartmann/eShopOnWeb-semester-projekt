@@ -151,8 +151,30 @@ jobs:
           DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           IMAGE: ${{ needs.build.outputs.image }}
         run: |
-          encoded=$(jq -rn --arg v "$IMAGE" '$v|@uri')
-          curl --fail --silent --show-error -X POST "${DEPLOY_HOOK}&imgURL=${encoded}"
+          set -euo pipefail
+
+          # Fjern mellemrum/linjeskift, der kan være kommet med ved copy-paste
+          DEPLOY_HOOK="${DEPLOY_HOOK//[[:space:]]/}"
+
+          # En Render deploy hook indeholder normalt ?key=... (uden den svarer Render 401)
+          if [[ "$DEPLOY_HOOK" != *"key="* ]]; then
+            echo "::warning::RENDER_DEPLOY_HOOK indeholder ingen 'key='. Kopiér hele URL'en fra Render (Settings -> Deploy Hook)."
+          fi
+
+          encoded=$(jq -rn --arg v "$IMAGE" '$v | @uri')
+
+          # Første query-parameter skal starte med ?, efterfølgende med &
+          if [[ "$DEPLOY_HOOK" == *"?"* ]]; then
+            separator="&"
+          else
+            separator="?"
+          fi
+
+          echo "Deployer image: $IMAGE"
+          # --fail-with-body viser Render's fejlbesked i loggen, hvis kaldet fejler
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            "${DEPLOY_HOOK}${separator}imgURL=${encoded}"
 
   deploy-production:
     name: Deploy production
@@ -167,8 +189,30 @@ jobs:
           DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           IMAGE: ${{ needs.build.outputs.image }}
         run: |
-          encoded=$(jq -rn --arg v "$IMAGE" '$v|@uri')
-          curl --fail --silent --show-error -X POST "${DEPLOY_HOOK}&imgURL=${encoded}"
+          set -euo pipefail
+
+          # Fjern mellemrum/linjeskift, der kan være kommet med ved copy-paste
+          DEPLOY_HOOK="${DEPLOY_HOOK//[[:space:]]/}"
+
+          # En Render deploy hook indeholder normalt ?key=... (uden den svarer Render 401)
+          if [[ "$DEPLOY_HOOK" != *"key="* ]]; then
+            echo "::warning::RENDER_DEPLOY_HOOK indeholder ingen 'key='. Kopiér hele URL'en fra Render (Settings -> Deploy Hook)."
+          fi
+
+          encoded=$(jq -rn --arg v "$IMAGE" '$v | @uri')
+
+          # Første query-parameter skal starte med ?, efterfølgende med &
+          if [[ "$DEPLOY_HOOK" == *"?"* ]]; then
+            separator="&"
+          else
+            separator="?"
+          fi
+
+          echo "Deployer image: $IMAGE"
+          # --fail-with-body viser Render's fejlbesked i loggen, hvis kaldet fejler
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            "${DEPLOY_HOOK}${separator}imgURL=${encoded}"
 
   # ---------------------------------------------------------------
   # FAILURE NOTIFICATION: Discord-besked hvis noget fejler
