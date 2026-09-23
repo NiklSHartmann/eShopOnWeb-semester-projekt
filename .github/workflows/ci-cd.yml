@@ -1,0 +1,188 @@
+# CI/CD for eShopOnWeb
+# Source → Build (+ artifacts) → Fast Tests → Slow Tests → Staging → Production (manuel godkendelse)
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # push af Docker image til GitHub Container Registry
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  PROJECT: src/Web/Web.csproj
+
+jobs:
+  # ---------------------------------------------------------------
+  # BUILD: installer dependencies, kompilér og byg artefakter ÉN gang
+  # ---------------------------------------------------------------
+  build:
+    name: Build + artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4 # Source
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install dependencies
+        run: dotnet restore "$PROJECT"
+
+      - name: Compile
+        run: dotnet build "$PROJECT" -c Release --no-restore
+
+      - name: Publish
+        run: dotnet publish "$PROJECT" -c Release --no-restore -o publish
+
+      # Artefakt 1: zip af det publicerede output
+      - name: Create zip
+        run: cd publish && zip -qr "../eshop-web-${GITHUB_SHA}.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eshop-web-${{ github.sha }}
+          path: eshop-web-${{ github.sha }}.zip
+          retention-days: 30
+
+      # Artefakt 2: Docker image bygget af SAMME publish-output (ingen ny kompilering)
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/eshop-web" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: docker
+        uses: docker/build-push-action@v6
+        with:
+          context: publish
+          file: Dockerfile.ci
+          push: true
+          provenance: false
+          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
+
+      # Digest = billedets unikke fingeraftryk. Det er det, alle senere stages bruger.
+      - name: Image reference
+        id: image
+        run: echo "ref=${{ steps.name.outputs.image }}@${{ steps.docker.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------
+  # FAST TESTS: unit tests, maks 2 minutter
+  # ---------------------------------------------------------------
+  fast-tests:
+    name: Fast tests (unit)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Build unit tests
+        run: dotnet build tests/UnitTests/UnitTests.csproj -c Release
+
+      - name: Run unit tests
+        timeout-minutes: 2
+        run: dotnet test tests/UnitTests/UnitTests.csproj -c Release --no-build
+
+  # ---------------------------------------------------------------
+  # SLOW TESTS: integration tests + API test mod det byggede image
+  # ---------------------------------------------------------------
+  slow-tests:
+    name: Slow tests (integration + API)
+    needs: [build, fast-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Integration tests
+        run: |
+          dotnet test tests/IntegrationTests/IntegrationTests.csproj -c Release
+          dotnet test tests/FunctionalTests/FunctionalTests.csproj -c Release
+          dotnet test tests/PublicApiIntegrationTests/PublicApiIntegrationTests.csproj -c Release
+
+      - name: Start container from the built image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker run -d --name app -p 8080:8080 \
+            -e ASPNETCORE_ENVIRONMENT=Docker \
+            -e UseOnlyInMemoryDatabase=true \
+            "${{ needs.build.outputs.image }}"
+
+      - name: API tests against container
+        run: |
+          curl --fail --silent --retry 20 --retry-delay 3 --retry-all-errors -o /dev/null http://localhost:8080/
+          curl --fail --silent -o /dev/null http://localhost:8080/Identity/Account/Login
+          echo "API tests OK"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs app
+
+  # ---------------------------------------------------------------
+  # DEPLOY: samme image til staging, derefter production
+  # ---------------------------------------------------------------
+  deploy-staging:
+    name: Deploy staging
+    needs: [build, slow-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.APP_URL }}
+    steps:
+      - name: Deploy image to Render
+        env:
+          DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          encoded=$(jq -rn --arg v "$IMAGE" '$v|@uri')
+          curl --fail --silent --show-error -X POST "${DEPLOY_HOOK}&imgURL=${encoded}"
+
+  deploy-production:
+    name: Deploy production
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: # "Required reviewers" på dette environment = manuel godkendelse
+      name: production
+      url: ${{ vars.APP_URL }}
+    steps:
+      - name: Deploy image to Render
+        env:
+          DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          encoded=$(jq -rn --arg v "$IMAGE" '$v|@uri')
+          curl --fail --silent --show-error -X POST "${DEPLOY_HOOK}&imgURL=${encoded}"
+
+  # ---------------------------------------------------------------
+  # FAILURE NOTIFICATION: Discord-besked hvis noget fejler
+  # ---------------------------------------------------------------
+  notify-failure:
+    name: Notify on failure
+    needs: [build, fast-tests, slow-tests, deploy-staging, deploy-production]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord message
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "Ingen DISCORD_WEBHOOK_URL sat - springer over"; exit 0; fi
+          msg="❌ Pipeline fejlede på ${GITHUB_REF_NAME} (${GITHUB_SHA::7}): ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          jq -n --arg c "$msg" '{content: $c}' | curl --fail -sS -H "Content-Type: application/json" -d @- "$WEBHOOK"
