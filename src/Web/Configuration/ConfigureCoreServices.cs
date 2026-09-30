@@ -4,6 +4,8 @@ using Microsoft.eShopWeb.Infrastructure.Data;
 using Microsoft.eShopWeb.Infrastructure.Data.Queries;
 using Microsoft.eShopWeb.Infrastructure.Logging;
 using Microsoft.eShopWeb.Infrastructure.Services;
+using Messaging.Shared; 
+using Microsoft.eShopWeb.Infrastructure.Messaging;
 
 namespace Microsoft.eShopWeb.Web.Configuration;
 
@@ -24,6 +26,19 @@ public static class ConfigureCoreServices
 
         services.AddScoped(typeof(IAppLogger<>), typeof(LoggerAdapter<>));
         services.AddTransient<IEmailSender, EmailSender>();
+
+        var rabbitMqOptions = configuration.GetSection(RabbitMqOptions.SectionName).Get<RabbitMqOptions>()
+                      ?? new RabbitMqOptions();
+
+        if (rabbitMqOptions.Enabled)
+        {
+            services.AddRabbitMqMessaging(configuration);
+            services.AddScoped<IOrderEventPublisher, RabbitMqOrderEventPublisher>();
+        }
+        else
+        {
+            services.AddScoped<IOrderEventPublisher, NullOrderEventPublisher>();
+        }
 
         return services;
     }

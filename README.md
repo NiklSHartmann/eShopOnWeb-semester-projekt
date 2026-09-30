@@ -171,3 +171,15 @@ We have some great contributions from the community, and while these aren't main
 [eShopOnWeb VB.NET](https://github.com/VBAndCs/eShopOnWeb_VB.NET) by Mohammad Hamdy Ghanem
 
 [FShopOnWeb](https://github.com/NitroDevs/FShopOnWeb) An F# take on eShopOnWeb by Sean G. Wright and Kyle McMaster
+
+
+### Configure RabbitMQ quorum queues
+
+Start RabbitMQ:
+
+```cmd
+docker compose up -d rabbitmq
+
+Apply the quorum queue policy with dead-lettering and a delivery limit:
+
+docker compose exec rabbitmq rabbitmqctl set_policy eshop-quorum "^eshop\." "{\"dea

@@ -4,6 +4,9 @@ services:
    environment:
      - ASPNETCORE_ENVIRONMENT=Docker
      - ASPNETCORE_URLS=http://+:8080
+     - RabbitMq__Enabled=true
+     - RabbitMq__HostName=rabbitmq
+     - RabbitMq__ClientName=eshop-web
    ports:
      - "5106:8080"
    volumes:
@@ -18,3 +21,4 @@ services:
    volumes:
      - ~/.aspnet/https:/root/.aspnet/https:ro
      - ~/.microsoft/usersecrets:/root/.microsoft/usersecrets:ro
+    
